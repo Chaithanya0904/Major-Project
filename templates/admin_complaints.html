@@ -224,21 +224,18 @@
             </td>
             <td class="table-cell">
               <div class="date-info">
-                <div class="date-display">
-                  <i class="far fa-calendar me-2"></i>
-                  {% if c.created_at is string %}
-                    {{ c.created_at }}
-                  {% else %}
-                    {{ c.created_at.strftime('%b %d, %Y') }}
-                  {% endif %}
-                </div>
-                <small class="text-muted">
-                  {% if c.created_at is string %}
-                    {{ c.created_at.split(' ')[1] if ' ' in c.created_at else '' }}
-                  {% else %}
-                    {{ c.created_at.strftime('%I:%M %p') }}
-                  {% endif %}
-                </small>
+              <div class="date-display">
+  <i class="far fa-calendar me-2"></i>
+
+  {% if c.created_at is string %}
+    {{ c.created_at.split(' ')[0] }}
+  {% else %}
+    {{ c.created_at.strftime('%b %d, %Y') }}
+  {% endif %}
+
+</div>
+
+              
               </div>
             </td>
             <td class="table-cell">
@@ -323,7 +320,7 @@
   <h6><i class="fas fa-image me-2"></i>Detected Image</h6>
 
   <div class="text-center mt-2">
-    <img src="/{{ c.image_path }}"
+    <img src="{{ url_for('static', filename=c.image_path) }}"
          class="img-fluid rounded shadow"
          style="max-height: 350px;"
          alt="Detected Complaint Image">

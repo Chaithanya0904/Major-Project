@@ -1,20 +1,41 @@
+# ===================== IMPORTS =====================
+import os
+import sqlite3
+import uuid
+import pathlib
+import torch
+from datetime import datetime
+import yaml
+import smtplib
+
 from flask import Flask, jsonify, render_template, request, redirect, url_for, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-import os
-import sqlite3
-from datetime import datetime
-import yaml
 from flask_socketio import SocketIO, emit, join_room
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
 app.secret_key = 'wverihdfuvuwi2482'
 
+EMAIL_ADDRESS = "c9074hai@gmail.com"
+EMAIL_PASSWORD = "dnhd qnaf dklq jshy"  
+ADMIN_EMAIL = "deeplearning251@gmail.com"
 
-app.config['DATABASE'] = 'database.db'
-app.config['COMPLAINT_UPLOAD_FOLDER'] = 'static/uploads/complaints'
+
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+app.config['DATABASE'] = os.path.join(BASE_DIR, 'database.db')
+
+app.config['COMPLAINT_UPLOAD_FOLDER'] = os.path.join(
+    BASE_DIR, 'static', 'uploads', 'complaints'
+)
+
+app.config['PROFILE_UPLOAD_FOLDER'] = os.path.join(
+    BASE_DIR, 'static', 'profiles'
+)
+
 os.makedirs(app.config['COMPLAINT_UPLOAD_FOLDER'], exist_ok=True)
-app.config['PROFILE_UPLOAD_FOLDER'] = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'static', 'profiles')
 os.makedirs(app.config['PROFILE_UPLOAD_FOLDER'], exist_ok=True)
 
 
@@ -65,6 +86,8 @@ def allowed_file(filename, filetype):
         allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
         return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
     return False
+
+
 
 @app.context_processor
 def inject_current_year():
@@ -163,61 +186,53 @@ def profile():
 
 
 
-import subprocess
+# Load model once
+model = torch.hub.load(
+    'ultralytics/yolov5:v6.2',
+    'custom',
+    path='best.pt',
+    source='github'
+)
 
-YOLO_DETECT_SCRIPT = "detect.py"
-WEIGHTS_PATH = "runs/train/exp3/weights/best.pt"
-YOLO_PROJECT = "static/detections"
-YOLO_NAME = "complaint_result"
 
-IMG_SIZE = "640"
+model.conf = 0.15
+model.iou = 0.45
 
-def run_yolo_detection(image_path):
-    class_names = load_class_names()
+def run_yolo_detection(image_path, detection_folder, filename):
+    import cv2
+    import os
 
-    command = [
-        "python", YOLO_DETECT_SCRIPT,
-        "--weights", WEIGHTS_PATH,
-        "--data", "data.yaml",   # 🔥 IMPORTANT
-        "--img", IMG_SIZE,
-        "--conf", "0.25",
-        "--source", image_path,
-        "--save-txt",
-        "--save-conf",
-        "--project", YOLO_PROJECT,
-        "--name", YOLO_NAME,
-        "--exist-ok"
-    ]
+    img = cv2.imread(image_path)
+    if img is None:
+        return None, "Image not readable"
 
-    subprocess.run(command)
+    results = model(img)
 
-    label_dir = os.path.join(YOLO_PROJECT, YOLO_NAME, "labels")
-    label_file = os.path.join(
-        label_dir,
-        os.path.splitext(os.path.basename(image_path))[0] + ".txt"
-    )
+   
+    detected_classes = []
 
-    detected = {}  # class_name → max_conf
+    for *box, conf, cls in results.xyxy[0]:
+        class_name = model.names[int(cls)]
+        detected_classes.append(class_name)
 
-    if os.path.exists(label_file):
-        with open(label_file, "r") as f:
-            for line in f:
-                cls, x, y, w, h, conf = line.strip().split()
-                cls = int(cls)
-                conf = float(conf)
+   
+    detected_classes = list(set(detected_classes))
 
-                name = class_names.get(cls, f"class_{cls}")
+   
+    if not detected_classes:
+        result_text = "No object detected"
+    else:
+        result_text = ", ".join(detected_classes)
 
-                if name not in detected or conf > detected[name]:
-                    detected[name] = conf
+    # Draw boxes
+    results.render()
 
-    if not detected:
-        return "No objects detected"
+    save_path = os.path.join(detection_folder, filename)
+    cv2.imwrite(save_path, img)
 
-    return ", ".join(
-        f"{name} ({conf*100:.2f}%)" for name, conf in detected.items()
-    )
+    return f"detections/{filename}", result_text
 
+import uuid
 
 @app.route('/complaint', methods=['GET', 'POST'])
 def complaint():
@@ -238,40 +253,44 @@ def complaint():
             flash('Please upload a valid image file.', 'danger')
             return redirect(request.url)
 
-       
-        filename = secure_filename(complaint_image.filename)
-        original_image_path = os.path.join(
-            app.config['COMPLAINT_UPLOAD_FOLDER'], filename
-        )
-        complaint_image.save(original_image_path)
+        
+        ext = complaint_image.filename.rsplit('.', 1)[1].lower()
+        unique_name = f"{uuid.uuid4().hex}.{ext}"
 
-     
-        detection_result = run_yolo_detection(original_image_path)
+        upload_folder = os.path.join("static", "uploads")
+        detection_folder = os.path.join("static", "detections")
 
-        detected_image_path = os.path.join(
-    YOLO_PROJECT, YOLO_NAME, filename
-).replace("\\", "/")
-
-        # detected_image_path = os.path.join(
-        #     YOLO_PROJECT, YOLO_NAME, filename
-        # )
+        os.makedirs(upload_folder, exist_ok=True)
+        os.makedirs(detection_folder, exist_ok=True)
 
         
+        original_path = os.path.join(upload_folder, unique_name)
+        complaint_image.save(original_path)
+
+        # Run detection
+        detected_relative_path, result_text = run_yolo_detection(
+            original_path,
+            detection_folder,
+            unique_name
+        )
+
+        if detected_relative_path is None:
+            flash("Error processing image.", "danger")
+            return redirect(request.url)
+
+        # Save to database
         conn = get_db_connection()
-        conn.execute(
-            '''
+        conn.execute("""
             INSERT INTO complients
             (title, description, image_path, result, user_email)
             VALUES (?, ?, ?, ?, ?)
-            ''',
-            (
-                title,
-                description,
-                detected_image_path,  
-                detection_result,     
-                session['email']
-            )
-        )
+        """, (
+            title,
+            description,
+            detected_relative_path,
+            result_text,
+            session['email']
+        ))
         conn.commit()
         conn.close()
 
@@ -279,8 +298,6 @@ def complaint():
         return redirect(url_for('my_complaints'))
 
     return render_template('complaint.html', title="File Complaint")
-
-
 
 @app.route('/my_complaints')
 def my_complaints():
@@ -451,19 +468,60 @@ def time_ago(value):
         return value.strftime("%b %d, %Y")
 
 
+def send_chat_start_email(sender_name, sender_email):
+    try:
+        subject = "New User Started Chat"
 
-# User Chat Route
+        body = f"""
+A user has started a chat.
+
+Name: {sender_name}
+Email: {sender_email}
+
+Please check admin dashboard.
+        """
+
+        msg = MIMEMultipart()
+        msg["From"] = EMAIL_ADDRESS
+        msg["To"] = ADMIN_EMAIL
+        msg["Subject"] = subject
+
+        msg.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.sendmail(EMAIL_ADDRESS, ADMIN_EMAIL, msg.as_string())
+        server.quit()
+
+        print("Chat start notification sent.")
+
+    except Exception as e:
+        print("Chat start email failed:", str(e))
+
+
 @app.route('/chat')
 def user_chat():
     if 'email' not in session:
         flash('Please login first.', 'warning')
         return redirect(url_for('login'))
 
+    # Send notification only once per session
+    if not session.get("chat_started_notified") and session.get("role") != "admin":
+
+        send_chat_start_email(
+            session.get("name"),
+            session.get("email")
+        )
+
+        session["chat_started_notified"] = True
+
     return render_template(
         'user_chat.html',
         room_id=session['email'],
         user_name=session['name']
     )
+
 
 
 
@@ -534,14 +592,17 @@ def on_join(data):
         room=room
     )
 
-
 @socketio.on('send_message')
 def handle_message(data):
     room = data['room']
+    sender_name = data['user']
+    message = data['message']
+
     emit('receive_message', {
-        'user': data['user'],
-        'msg': data['message']
+        'user': sender_name,
+        'msg': message
     }, room=room)
+
 
 @app.route('/logout')
 def logout():
@@ -554,7 +615,7 @@ if __name__ == '__main__':
 
     socketio.run(
         app,
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=5000,
         debug=True,
         use_reloader=False
